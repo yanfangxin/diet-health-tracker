@@ -1,121 +1,308 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-void main() {
-  runApp(const MyApp());
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 載入 .env 檔案
+  await dotenv.load(fileName: ".env");
+
+  // 從 .env 讀取金鑰
+  await Supabase.initialize(
+    url: dotenv.env['SUPABASE_URL']!,
+    anonKey: dotenv.env['SUPABASE_ANON_KEY']!,
+  );
+
+  runApp(const DietTrackerApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class DietTrackerApp extends StatelessWidget {
+  const DietTrackerApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: '個人飲食健康管理',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.teal,
+          brightness: Brightness.light,
+        ),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const DashboardScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class DashboardScreen extends StatefulWidget {
+  const DashboardScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _DashboardScreenState extends State<DashboardScreen> {
+  int _waterMl = 0;
+  int _sleepMinutes = 0;
+  double _weight = 0.0;
+  int _totalCalories = 0;
+  bool _isLoading = false;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _fetchTodayData();
+  }
+
+  // 取得今天的日期字串 (例如: 2026-07-22)
+  String get _todayStr => DateTime.now().toIso8601String().split('T')[0];
+
+  // 1. 從 Supabase 讀取今日數據
+  Future<void> _fetchTodayData() async {
+    setState(() => _isLoading = true);
+    final supabase = Supabase.instance.client;
+
+    try {
+      // 讀取今日飲水/睡眠/體重
+      final dailyLog = await supabase
+          .from('diet_daily_logs')
+          .select()
+          .eq('date', _todayStr)
+          .maybeSingle();
+
+      // 讀取今日飲食熱量
+      final foodLogs = await supabase
+          .from('diet_food_logs')
+          .select('calories')
+          .eq('logged_date', _todayStr);
+
+      int caloriesSum = 0;
+      for (var food in foodLogs) {
+        caloriesSum += (food['calories'] as int);
+      }
+
+      if (mounted) {
+        setState(() {
+          if (dailyLog != null) {
+            _waterMl = dailyLog['water_intake_ml'] ?? 0;
+            _sleepMinutes = dailyLog['sleep_minutes'] ?? 0;
+            _weight = (dailyLog['weight_kg'] as num?)?.toDouble() ?? 0.0;
+          } else {
+            _waterMl = 0;
+            _sleepMinutes = 0;
+            _weight = 0.0;
+          }
+          _totalCalories = caloriesSum;
+        });
+      }
+    } catch (e) {
+      debugPrint("讀取資料失敗: $e");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  // 2. 實作「一鍵 +250ml 喝水」
+  Future<void> _addWater(int amountMl) async {
+    final supabase = Supabase.instance.client;
+    final newWaterTotal = _waterMl + amountMl;
+
+    try {
+      // 使用 upsert：若今天資料已存在則更新，不存在則自動建立
+      await supabase.from('diet_daily_logs').upsert({
+        'date': _todayStr,
+        'water_intake_ml': newWaterTotal,
+        'sleep_minutes': _sleepMinutes,
+        'weight_kg': _weight > 0 ? _weight : null,
+      }, onConflict: 'date');
+
+      _fetchTodayData(); // 重新整理畫面
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('💧 已成功增加 ${amountMl}ml 飲水量！')),
+        );
+      }
+    } catch (e) {
+      debugPrint("加水失敗: $e");
+    }
+  }
+
+  // 3. 實作「更新體重與睡眠」彈出對話框
+  void _showUpdateHealthDialog() {
+    final weightController = TextEditingController(text: _weight > 0 ? _weight.toString() : '');
+    final sleepHoursController = TextEditingController(
+      text: _sleepMinutes > 0 ? (_sleepMinutes / 60).toStringAsFixed(1) : '',
+    );
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('記錄今日體重與睡眠'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: weightController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  labelText: '今日體重 (kg)',
+                  hintText: '例如: 65.5',
+                  suffixText: 'kg',
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: sleepHoursController,
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  labelText: '昨晚睡眠時數 (小時)',
+                  hintText: '例如: 7.5',
+                  suffixText: '小時',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final double? inputWeight = double.tryParse(weightController.text);
+                final double? inputSleepHours = double.tryParse(sleepHoursController.text);
+
+                final int sleepMins = inputSleepHours != null ? (inputSleepHours * 60).round() : _sleepMinutes;
+                final double weightVal = inputWeight ?? _weight;
+
+                final supabase = Supabase.instance.client;
+                await supabase.from('diet_daily_logs').upsert({
+                  'date': _todayStr,
+                  'water_intake_ml': _waterMl,
+                  'sleep_minutes': sleepMins,
+                  'weight_kg': weightVal > 0 ? weightVal : null,
+                }, onConflict: 'date');
+
+                if (context.mounted) Navigator.pop(context);
+                _fetchTodayData();
+              },
+              child: const Text('儲存'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('今日健康儀表板', style: TextStyle(fontWeight: FontWeight.bold)),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _fetchTodayData,
+          )
+        ],
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '📅 今天：$_todayStr',
+                    style: const TextStyle(fontSize: 16, color: Colors.grey, fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // 數據摘要卡片網格
+                  GridView.count(
+                    crossAxisCount: 2,
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                    childAspectRatio: 1.3,
+                    children: [
+                      _buildStatCard('🔥 熱量攝取', '$_totalCalories', 'kcal', Colors.orange),
+                      _buildStatCard('💧 喝水量', '$_waterMl', 'ml', Colors.blue),
+                      _buildStatCard('😴 睡眠時間', '${(_sleepMinutes / 60).toStringAsFixed(1)}', '小時', Colors.indigo),
+                      _buildStatCard('⚖️ 體重', _weight > 0 ? '$_weight' : '--', 'kg', Colors.green),
+                    ],
+                  ),
+
+                  const SizedBox(height: 24),
+                  const Text('🚀 快速功能紀錄', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 12),
+
+                  // 功能按鈕區
+                  ListTile(
+                    leading: const CircleAvatar(backgroundColor: Colors.blueAccent, child: Icon(Icons.local_drink, color: Colors.white)),
+                    title: const Text('記錄喝水 (+250ml)'),
+                    subtitle: const Text('點擊快速增加 250ml 飲水量'),
+                    trailing: const Icon(Icons.add_circle_outline, color: Colors.blueAccent),
+                    onTap: () => _addWater(250), // 綁定加水邏輯
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const CircleAvatar(backgroundColor: Colors.orangeAccent, child: Icon(Icons.camera_alt, color: Colors.white)),
+                    title: const Text('AI 拍照辨識飲食'),
+                    subtitle: const Text('上傳餐點照片自動估算熱量'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      // 下一步要寫的 Gemini AI 辨識
+                    },
+                  ),
+                  const Divider(),
+                  ListTile(
+                    leading: const CircleAvatar(backgroundColor: Colors.green, child: Icon(Icons.monitor_weight, color: Colors.white)),
+                    title: const Text('更新體重 / 睡眠'),
+                    subtitle: const Text('輸入今日體重與昨晚睡眠時間'),
+                    trailing: const Icon(Icons.edit, color: Colors.green),
+                    onTap: _showUpdateHealthDialog, // 綁定彈出視窗
+                  ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  Widget _buildStatCard(String title, String value, String unit, Color color) {
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Text(title, style: const TextStyle(fontSize: 14, color: Colors.black54)),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  value,
+                  style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold, color: color),
+                ),
+                const SizedBox(width: 4),
+                Text(unit, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }

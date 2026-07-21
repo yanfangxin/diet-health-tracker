@@ -162,4 +162,6 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
->>>>>>> 28146fee0fd5309efcffaac3a0a780dafb0dceed
+
+# Plaintext
+.env
